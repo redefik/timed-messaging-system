@@ -8,10 +8,13 @@
 #define MODNAME "TIMED-MSG-SYSTEM"
 #define DEVICE_NAME "timed-msg-device"
 #define MINORS 3 // supported minor numbers
+#define MAX_MSG_SIZE_DEFAULT 4096 // bytes
+#define MAX_STORAGE_SIZE_DEFAULT 65536 // bytes
 
-static unsigned int max_message_size; 
+// root-configurable parameters
+static unsigned int max_message_size = MAX_MSG_SIZE_DEFAULT; 
 module_param(max_message_size, uint, S_IRUGO | S_IWUSR);
-static unsigned int max_storage_size; 
+static unsigned int max_storage_size = MAX_STORAGE_SIZE_DEFAULT;
 module_param(max_storage_size, uint, S_IRUGO | S_IWUSR);
 
 // Supported file operations
