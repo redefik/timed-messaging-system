@@ -9,6 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include "timed-msg-system.h" // TODO possibly move to this file some of the following definitions
 
 #define TEST // uncomment in "production"
 
@@ -156,9 +157,23 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	return len;
 }
 
-static long dev_ioctl(struct file *filep, unsigned int c, unsigned long v)
+static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
-	// TODO
+	// TODO 
+	switch (cmd) {
+		case SET_SEND_TIMEOUT:
+			printk(KERN_INFO "%s: SET_SEND_TIMEOUT with arg:%lu\n", MODNAME, arg);
+			break;
+		case SET_RECV_TIMEOUT:
+			printk(KERN_INFO "%s: SET_RECV_TIMEOUT with arg:%lu\n", MODNAME, arg);
+			break;
+		case REVOKE_DELAYED_MESSAGES:
+			printk(KERN_INFO "%s: REVOKE_DELAYED_MESSAGES\n", MODNAME);
+			break;
+		default:
+			printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);
+			return -ENOTTY;
+	}
 	return 0;
 }
 
