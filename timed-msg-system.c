@@ -131,7 +131,7 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	if (minors[minor_idx].current_size + len > max_storage_size) {
 		mutex_unlock(&(minors[minor_idx].mtx));
 		kfree(kbuf);
-		return 0; // device file is temporary full
+		return -EAGAIN; // device file is temporary full
 	}
 	
 	// Allocate a message_struct

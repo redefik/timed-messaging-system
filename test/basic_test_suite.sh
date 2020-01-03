@@ -44,14 +44,14 @@ rm -f /dev/my_test_dev
 rmmod $module
 
 echo "******************************Test Case no.4*********************************"
-echo "Expected: blocks for a second, prints ab and Resource Temp. Unavailable"
+echo "Expected: echo fails with: Resource Temporary Unavailable and ab is printed"
 echo "Output:"
 insmod $module
 major=$(<$major_parameter)
 mknod $test_file c $major 0
 echo 3 > $max_storage_size
 echo "ab" > $test_file
-timeout 1 echo "pippo" > $test_file # This should block because the device full is full
+echo "pippo" > $test_file # RTU because the device file is already full
 cat $test_file
 rm -f /dev/my_test_dev
 rmmod $module
