@@ -9,6 +9,8 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <linux/workqueue.h>
+#include <linux/param.h>
 #include "timed-msg-system.h" // TODO possibly move to this file some of the following definitions
 
 #define TEST // uncomment in "production"
@@ -18,6 +20,7 @@
 #define MINORS 3 // supported minor numbers
 #define MAX_MSG_SIZE_DEFAULT 4096 // bytes
 #define MAX_STORAGE_SIZE_DEFAULT 65536 // bytes
+#define WRITE_WORK_QUEUE "wq-timed-msg-system"
 
 // root-configurable parameters
 static unsigned int max_message_size = MAX_MSG_SIZE_DEFAULT; 
@@ -39,6 +42,25 @@ struct minor_struct {
 	struct list_head fifo; // points to the FIFO queue of message_struct
 };
 
+// Represents a deferred write
+struct pending_write_struct {
+	int minor; // instance of the device file involved in the write
+	struct session_struct *session; // session involved in the write
+	char *kbuf; // temporary buffer containing the message to write
+	unsigned int len; // message length
+	struct delayed_work delayed_work;
+	struct list_head list; // used to link the node in a list
+};
+
+// Extra information about an I/O session
+// TODO to be extended including fields related to reads
+struct session_struct {
+	struct mutex mtx;
+	struct workqueue_struct *write_wq; // used to defer writes
+	unsigned long write_timeout; // 0 means immediate storing 
+	struct list_head pending_writes; // points to list of deferred writes
+};
+
 static int major; // dinamically allocated by the kernel
 #ifdef TEST
 module_param(major, int, S_IRUGO | S_IWUSR);
@@ -53,15 +75,42 @@ static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static long dev_ioctl(struct file *, unsigned int, unsigned long);
 static int dev_flush(struct file *, fl_owner_t id);
 
+// TODO possibly centralize error mgmt
 static int dev_open(struct inode *inodep, struct file *filep)
 {
-	// TODO
+	struct session_struct *session_struct;
+	
+	// Allocate a session_struct object
+	session_struct = kmalloc(sizeof(struct session_struct), GFP_KERNEL);
+	if (session_struct == NULL) {
+		return -ENOMEM;
+	}
+	// Initalize the object
+	mutex_init(&(session_struct->mtx));
+	session_struct->write_wq = alloc_workqueue(WRITE_WORK_QUEUE, 
+	                                           WQ_MEM_RECLAIM, 0);
+	if (session_struct->write_wq == NULL) {
+		kfree(session_struct);
+		return -ENOMEM;
+	}
+	session_struct->write_timeout = 0;
+	INIT_LIST_HEAD(&(session_struct->pending_writes));
+	// Link the object to struct file
+	filep->private_data = (void *)session_struct;
+	
 	return 0;
 }
 
+// TODO possibly modify it after implementing dev_flush()
 static int dev_release(struct inode *inodep, struct file *filep)
 {
-	// TODO
+	struct session_struct *session_struct;
+	
+	// Deallocate session_struct object linked to struct file
+	session_struct = (struct session_struct *)filep->private_data;
+	destroy_workqueue(session_struct->write_wq);
+	kfree(session_struct);	
+	
 	return 0;
 }
 
@@ -69,7 +118,7 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 {
 	int minor_idx;
 	struct message_struct *msg;
-	
+		
 	minor_idx = iminor(filep->f_inode); // TODO possibly make it more portable using versioning
 	mutex_lock(&(minors[minor_idx].mtx));
 	
@@ -85,6 +134,7 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	if (len > msg->size) {
 		len = msg->size;
 	}
+	
 	if (copy_to_user(bufp, msg->buf, len)) {
 		mutex_unlock(&(minors[minor_idx].mtx));
 		return -EFAULT;
@@ -103,12 +153,64 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	
 }
 
+// TODO possibly centralize error mgmt
+static void deferred_write(struct work_struct *work_struct)
+{
+	struct delayed_work *delayed_work;
+	struct pending_write_struct *pending_write;
+	struct message_struct *msg;
+		
+	delayed_work = container_of(work_struct, struct delayed_work, work);
+	pending_write = container_of(delayed_work, struct pending_write_struct, 
+	                                           delayed_work);
+	// Remove the deferred work from the list of pending writes
+	mutex_lock(&(pending_write->session->mtx));
+	list_del(&(pending_write->list));
+	mutex_unlock(&(pending_write->session->mtx));
+	
+	mutex_lock(&(minors[pending_write->minor].mtx));
+
+	if (minors[pending_write->minor].current_size + pending_write->len > max_storage_size) {
+		mutex_unlock(&(minors[pending_write->minor].mtx));
+		kfree(pending_write->kbuf);
+		kfree(pending_write);
+		return; // device file is temporary full
+	}
+	
+	// Allocate a message_struct
+	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
+	if (msg == NULL) {
+		mutex_unlock(&(minors[pending_write->minor].mtx));
+		kfree(pending_write->kbuf);
+		kfree(pending_write);
+		return;
+	}
+	
+	// Initialize the message_struct
+	msg->buf = pending_write->kbuf;
+	msg->size = pending_write->len;
+	INIT_LIST_HEAD(&(msg->list));
+	// Enqueue the message_struct
+	list_add_tail(&(msg->list), &(minors[pending_write->minor].fifo));
+	
+	// Update device file size
+	minors[pending_write->minor].current_size += pending_write->len;
+	
+	mutex_unlock(&(minors[pending_write->minor].mtx));
+	
+	kfree(pending_write);
+		
+	return;
+}
+
 // TODO possibly centralize error management
 static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_t *offp)
 {
 	char *kbuf;
 	int minor_idx;
 	struct message_struct *msg;
+	struct pending_write_struct *pending_write;
+	struct session_struct *session = (struct session_struct *)filep->private_data;
 
 	if (len > max_message_size) {
 		return -EMSGSIZE;
@@ -127,6 +229,34 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	}
 	
 	minor_idx = iminor(filep->f_inode); // TODO possibly, make it more portable using versioning
+
+	mutex_lock(&(session->mtx));
+	if (session->write_timeout) { // a write timeout exists
+		// Allocate a pending_write_struct object
+		pending_write = kmalloc(sizeof(struct pending_write_struct), GFP_KERNEL);
+		if (pending_write == NULL) {
+			kfree(kbuf);
+			mutex_unlock(&(session->mtx));
+			return -ENOMEM;
+		}
+		// Initialize the object
+		pending_write->minor = minor_idx;
+		pending_write->session = session;
+		pending_write->kbuf = kbuf;
+		pending_write->len = len;
+		INIT_LIST_HEAD(&(pending_write->list));
+		INIT_DELAYED_WORK(&(pending_write->delayed_work), deferred_write);
+		// Add the object to the list of pending writes linked to the session
+		list_add_tail(&(pending_write->list),&(session->pending_writes));
+		// Defer the write using the write workqueue
+		queue_delayed_work(session->write_wq, &(pending_write->delayed_work), 
+		                   session->write_timeout);
+		mutex_unlock(&(session->mtx));
+		return 0; // no byte actually written                                                 
+	}
+	
+	mutex_unlock(&(session->mtx));
+	
 	mutex_lock(&(minors[minor_idx].mtx));
 	
 	if (minors[minor_idx].current_size + len > max_storage_size) {
@@ -159,10 +289,14 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
+	struct session_struct *session = (struct session_struct *)filep->private_data;
+
 	// TODO 
 	switch (cmd) {
 		case SET_SEND_TIMEOUT:
-			printk(KERN_INFO "%s: SET_SEND_TIMEOUT with arg:%lu\n", MODNAME, arg);
+			mutex_lock(&(session->mtx));
+			session->write_timeout = arg * HZ / 1000; // msec to jiffies TODO
+			mutex_unlock(&(session->mtx));
 			break;
 		case SET_RECV_TIMEOUT:
 			printk(KERN_INFO "%s: SET_RECV_TIMEOUT with arg:%lu\n", MODNAME, arg);
