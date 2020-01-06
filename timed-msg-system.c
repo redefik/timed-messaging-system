@@ -159,7 +159,10 @@ static void deferred_write(struct work_struct *work_struct)
 	struct delayed_work *delayed_work;
 	struct pending_write_struct *pending_write;
 	struct message_struct *msg;
-		
+	
+	// work_struct is embedded in a struct delayed_work (work field)
+	// delayed_work is embedded in a struct pending_write_struct
+	// so twice invokation of containener_of is needed	
 	delayed_work = container_of(work_struct, struct delayed_work, work);
 	pending_write = container_of(delayed_work, struct pending_write_struct, 
 	                                           delayed_work);
@@ -290,8 +293,10 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct session_struct *session = (struct session_struct *)filep->private_data;
+	struct list_head *ptr;
+	struct list_head *tmp;
+	struct pending_write_struct *pending_write;
 
-	// TODO 
 	switch (cmd) {
 		case SET_SEND_TIMEOUT:
 			mutex_lock(&(session->mtx));
@@ -300,9 +305,23 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 			break;
 		case SET_RECV_TIMEOUT:
 			printk(KERN_INFO "%s: SET_RECV_TIMEOUT with arg:%lu\n", MODNAME, arg);
+			//TODO
 			break;
 		case REVOKE_DELAYED_MESSAGES:
-			printk(KERN_INFO "%s: REVOKE_DELAYED_MESSAGES\n", MODNAME);
+			mutex_lock(&(session->mtx));
+			// Scan pending writes
+			list_for_each_safe(ptr, tmp, &(session->pending_writes)) {
+				pending_write = list_entry(ptr, struct pending_write_struct, list);
+				// Cancel delayed write
+				// NOTE that the pending write may be actually already in execution
+				// thus we have to check return value
+				if (cancel_delayed_work(&(pending_write->delayed_work))) {
+					list_del(&(pending_write->list));
+					kfree(pending_write->kbuf);
+					kfree(pending_write);
+				}
+			}
+			mutex_unlock(&(session->mtx));
 			break;
 		default:
 			printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);

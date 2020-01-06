@@ -11,7 +11,6 @@
 #include "../timed-msg-system.h"
 
 // Execute after sudoing in your shell
-// Execute with time
 
 #define MINOR 0
 #define MAX_MSG_SIZE 128
@@ -44,30 +43,53 @@ int main(int argc, char *argv[])
 		return(EXIT_FAILURE);
 	}
 	
+	printf("Setting write timeout...\n");
 	// Set write timeout
 	ioctl(fd, SET_SEND_TIMEOUT, timeout);
 	
+	printf("Writing the input message...\n");
 	// Write the input message
 	ret = write(fd, argv[4], strlen(argv[4]) + 1);
 	if (ret == -1) {
 		fprintf(stderr, "write() failed\n");
 		return(EXIT_FAILURE);
 	}
-	printf("write done, return value:%d\n", ret);
-	printf("Reading...\n");
+
+	printf("Sleeping...\n");
 	
+	// sleep before reading to let the message be written
+	sleep((timeout/1000)+1);
+	
+	printf("Reading...\n");
 	// Read the message
-	while (1) {
-		ret = read(fd, msg, MAX_MSG_SIZE);
-		if (ret == -1 && errno != EAGAIN) {
-			fprintf(stderr, "read() failed\n");
-			return(EXIT_FAILURE);
-		}
-		if (ret > 0) {
-			printf("read: %s\n", msg);
-			break;
-		}
+	ret = read(fd, msg, MAX_MSG_SIZE);
+	if (ret <= 0) {
+		fprintf(stderr, "read failed in an uxpected way\n");
+		return(EXIT_FAILURE);
+	}
+	printf("read: %s\n", msg);
+	
+	printf("Writing the input message...\n");
+	ret = write(fd, argv[4], strlen(argv[4]) + 1);
+	if (ret == -1) {
+		fprintf(stderr, "write() failed\n");
+		return(EXIT_FAILURE);
 	}
 	
-	return(EXIT_SUCCESS);
+	printf("Revoking delayed write...\n");
+	ioctl(fd, REVOKE_DELAYED_MESSAGES);
+	
+	printf("Sleeping...\n");
+	sleep((timeout/1000)+1);
+
+	printf("Reading...\n");
+	ret = read(fd, msg, MAX_MSG_SIZE);
+	if (ret == -1 && errno == EAGAIN) {
+		printf("read() returned EAGAIN as expected\n");
+		return(EXIT_SUCCESS);
+	}
+
+	printf("Unexpected behaviour of read(), return value=%d\n", ret);
+	return(EXIT_FAILURE);
+
 }
