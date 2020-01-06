@@ -57,7 +57,8 @@ struct pending_write_struct {
 struct session_struct {
 	struct mutex mtx;
 	struct workqueue_struct *write_wq; // used to defer writes
-	unsigned long write_timeout; // 0 means immediate storing 
+	unsigned long write_timeout; // 0 means immediate storing
+	unsigned long read_timeout; // 0 means non-blocking reads in the absence of messages
 	struct list_head pending_writes; // points to list of deferred writes
 };
 
@@ -94,6 +95,7 @@ static int dev_open(struct inode *inodep, struct file *filep)
 		return -ENOMEM;
 	}
 	session_struct->write_timeout = 0;
+	session_struct->read_timeout = 0;
 	INIT_LIST_HEAD(&(session_struct->pending_writes));
 	// Link the object to struct file
 	filep->private_data = (void *)session_struct;
@@ -207,6 +209,25 @@ static void deferred_write(struct work_struct *work_struct)
 }
 
 // TODO possibly centralize error management
+/**
+ * dev_write - Write a message into the device file
+ * @filep: pointer to struct file
+ * @bufp: pointer to user buffer containing the message
+ * @len: message size
+ * @offp: unused
+ *
+ * Returns:
+ * - the length of the written message, if the non-blocking mode is set and the
+ * - operation succeeds.
+ * - %EMSGSIZE if the message is too long (len > max_message_size)
+ * - %ENOMEM if allocation of used kernel buffers fails
+ * - %EFAULT if @bufp points to an illegal memory area
+ * - %EAGAIN if the device file is temporary full
+ * - %0 if a write timeout exists. In that case, the actual write is delayed.
+ *
+ * NOTE that when the write is delayed, it may fail in the absence of free
+ * space in the device file. 
+ */
 static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_t *offp)
 {
 	char *kbuf;
@@ -290,12 +311,28 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	return len;
 }
 
-// NOTE HZ (jiffies per seconds) is tipically >= 100 and <= 100
-// therefore the timeout is expressed in milliseconds.
-// Furthermore, the provided timeout may be too short. In that case the timeout
-// will be finally 0. e.g. if HZ=100 timeout=1ms cause the actual timeout to be
-// 0, while 10 ms maps to 1 jiffies.
 // TODO possibly provide a more fine-grained timeout mechanism
+/**
+* dev_ioctl - modify the operating mode of read() and write()
+* @filep: pointer to struct file
+* @cmd: one of the macro defined in timed-msg-system.h (%SET_SEND_TIMEOUT,
+* %SET_RECV_TIMEOUT, %REVOKE_DELAYED_MESSAGES)
+* @arg: read/write timeout (optional)
+*
+* Returns:
+* - 0 if the operation succeeds
+* - %ENOTTY if the provided command is not valid
+*
+* If %SET_SEND_TIMEOUT is provided, the write timeout of the current session
+* is set to the value @arg.
+* If %SET_RECV_TIMEOUT is provided, the read timeout of the current session
+* is set to the value @arg.
+* If %REVOKE_DELAYED_MESSAGES is provided, the pending writes are undone.
+*
+* NOTE @arg is interpreted as milliseconds and the granularity of the actual
+* timeout is the one of jiffies. Therefore, according to the value of HZ,
+* the timeout may be set to 0 if too short.
+*/
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct session_struct *session = (struct session_struct *)filep->private_data;
@@ -310,8 +347,9 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 			mutex_unlock(&(session->mtx));
 			break;
 		case SET_RECV_TIMEOUT:
-			printk(KERN_INFO "%s: SET_RECV_TIMEOUT with arg:%lu\n", MODNAME, arg);
-			//TODO
+			mutex_lock(&(session->mtx));
+			session->read_timeout = (arg * HZ)/1000;
+			mutex_unlock(&(session->mtx));
 			break;
 		case REVOKE_DELAYED_MESSAGES:
 			mutex_lock(&(session->mtx));
