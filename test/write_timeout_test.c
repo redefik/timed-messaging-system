@@ -44,7 +44,7 @@ int main(int argc, char *argv[])
 		return(EXIT_FAILURE);
 	}
 	
-	// Perform various ioctl
+	// Set write timeout
 	ioctl(fd, SET_SEND_TIMEOUT, timeout);
 	
 	// Write the input message

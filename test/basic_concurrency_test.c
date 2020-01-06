@@ -8,6 +8,10 @@
 #include <pthread.h>
 #include <string.h>
 #include <errno.h>
+#ifdef W_TIMEOUT
+#include <sys/ioctl.h>
+#include "../timed-msg-system.h"
+#endif
 
 #define MINOR 0
 #define WRITERS 10
@@ -60,9 +64,9 @@ void *reader(void *arg)
 			fprintf(stderr, "read() failed\n");
 			exit(EXIT_FAILURE);
 		}
-		if (errno != EAGAIN) {
-			printf("%lu read: %s\n", id, msg);
-		} // the thread will block when the device file becomes empty	
+		if (ret > 0) {
+			printf("read:%s\n",msg);
+		}	
 	}
 	
 	return NULL; // never reached
@@ -95,6 +99,15 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "open() failed\n");
 		return(EXIT_FAILURE);
 	}
+	
+	#ifdef W_TIMEOUT
+	ret = ioctl(fd, SET_SEND_TIMEOUT, (unsigned long)W_TIMEOUT);
+	printf("timeout=%lu\n", (unsigned long)W_TIMEOUT);
+	if (ret == -1) {
+		fprintf(stderr, "ioctl() failed\n");
+		return(EXIT_FAILURE);
+	}
+	#endif
 	
 	// Create readers and writers
 	for (i = 0; i < WRITERS; i++) {
