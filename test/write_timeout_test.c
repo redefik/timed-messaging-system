@@ -8,12 +8,14 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include "../timed-msg-system.h"
 
 // Execute after sudoing in your shell
 
 #define MINOR 0
 #define MAX_MSG_SIZE 128
+
 
 int main(int argc, char *argv[])
 {
@@ -22,13 +24,13 @@ int main(int argc, char *argv[])
 	char msg[MAX_MSG_SIZE];
 
 	if (argc != 5) {
-		fprintf(stderr, "Usage:%s <pathname> <major> <timeout> <message>\n", argv[0]);
+		fprintf(stderr, "Usage:sudo %s <pathname> <major> <msecs> <message>\n", argv[0]);
 		return(EXIT_FAILURE);
 	}
 	
 	major = strtoul(argv[2], NULL, 0);
-	timeout = strtoul(argv[3], NULL, 0);
-	
+	timeout = strtoul(argv[3], NULL, 0); //mseconds
+		
 	// Create a char device file with the given major and 0 with minor number
 	ret = mknod(argv[1], S_IFCHR, makedev(major, MINOR));
 	if (ret == -1) {
@@ -44,6 +46,7 @@ int main(int argc, char *argv[])
 	}
 	
 	printf("Setting write timeout...\n");
+	
 	// Set write timeout
 	ioctl(fd, SET_SEND_TIMEOUT, timeout);
 	
@@ -56,15 +59,13 @@ int main(int argc, char *argv[])
 	}
 
 	printf("Sleeping...\n");
-	
-	// sleep before reading to let the message be written
-	sleep((timeout/1000)+1);
+	usleep((2*timeout)*1000); // sleep to let the message be written
 	
 	printf("Reading...\n");
 	// Read the message
 	ret = read(fd, msg, MAX_MSG_SIZE);
 	if (ret <= 0) {
-		fprintf(stderr, "read failed in an uxpected way\n");
+		fprintf(stderr, "read failed in an unexpected way\n");
 		return(EXIT_FAILURE);
 	}
 	printf("read: %s\n", msg);
@@ -80,8 +81,8 @@ int main(int argc, char *argv[])
 	ioctl(fd, REVOKE_DELAYED_MESSAGES);
 	
 	printf("Sleeping...\n");
-	sleep((timeout/1000)+1);
-
+	usleep((2*timeout)*1000);
+		
 	printf("Reading...\n");
 	ret = read(fd, msg, MAX_MSG_SIZE);
 	if (ret == -1 && errno == EAGAIN) {

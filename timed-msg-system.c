@@ -251,10 +251,10 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 		INIT_DELAYED_WORK(&(pending_write->delayed_work), deferred_write);
 		// Add the object to the list of pending writes linked to the session
 		list_add_tail(&(pending_write->list),&(session->pending_writes));
+		mutex_unlock(&(session->mtx));
 		// Defer the write using the write workqueue
 		queue_delayed_work(session->write_wq, &(pending_write->delayed_work), 
 		                   session->write_timeout);
-		mutex_unlock(&(session->mtx));
 		return 0; // no byte actually written                                                 
 	}
 	
@@ -290,6 +290,12 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	return len;
 }
 
+// NOTE HZ (jiffies per seconds) is tipically >= 100 and <= 100
+// therefore the timeout is expressed in milliseconds.
+// Furthermore, the provided timeout may be too short. In that case the timeout
+// will be finally 0. e.g. if HZ=100 timeout=1ms cause the actual timeout to be
+// 0, while 10 ms maps to 1 jiffies.
+// TODO possibly provide a more fine-grained timeout mechanism
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct session_struct *session = (struct session_struct *)filep->private_data;
@@ -300,7 +306,7 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 		case SET_SEND_TIMEOUT:
 			mutex_lock(&(session->mtx));
-			session->write_timeout = arg * HZ / 1000; // msec to jiffies TODO
+			session->write_timeout = (arg * HZ)/1000;
 			mutex_unlock(&(session->mtx));
 			break;
 		case SET_RECV_TIMEOUT:
