@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include "../timed-msg-system.h"
 
 #define MINOR 0
@@ -55,20 +56,20 @@ void *reader(void *arg)
 {
 	char msg[MAX_MSG_SIZE];
 	int ret;
-	pthread_t id = pthread_self();
+	int pid = syscall(186); //gettid() system call (not wrapped by glibc currently)
 	
 	// Read messages from the device file
 	ret = read(fd, msg, MAX_MSG_SIZE);
 	if (ret == -1 && errno == ETIME) {
-		printf("%lu timeout expired\n", id);
+		printf("%d timeout expired\n", pid);
 		return NULL;
 	}
 	if (ret == -1 & errno != ETIME) {
-		printf("%lu read() failed in a strange way\n", id);
+		printf("%d read() failed in a strange way\n", pid);
 		return NULL;
 	}
 	if (ret > 0) {
-		printf("%lu read: %s\n", id, msg);
+		printf("%d read: %s\n", pid, msg);
 		return NULL;
 	}	
 }
