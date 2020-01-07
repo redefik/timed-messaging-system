@@ -14,7 +14,7 @@
 #include <linux/wait.h>
 #include "timed-msg-system.h" // TODO possibly move to this file some of the following definitions
 
-#define TEST // uncomment in "production"
+#define TEST // comment in "production"
 
 #define MODNAME "TIMED-MSG-SYSTEM"
 #define DEVICE_NAME "timed-msg-device"
@@ -198,6 +198,10 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 		                                       pending_read->msg_available,
 		                                       to_sleep);
 		if (ret == -ERESTARTSYS) { // sleep interrupted by a signal
+			mutex_lock(&(session->mtx));
+			list_del(&(pending_read->list));
+			mutex_unlock(&(session->mtx));
+			kfree(pending_read);
 			return ret;
 		}
 		if (ret == 0) { // empty list after timer expiration
