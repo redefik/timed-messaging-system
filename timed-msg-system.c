@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/workqueue.h>
 #include <linux/param.h>
+#include <linux/wait.h>
 #include "timed-msg-system.h" // TODO possibly move to this file some of the following definitions
 
 #define TEST // uncomment in "production"
@@ -57,6 +58,7 @@ struct pending_write_struct {
 struct session_struct {
 	struct mutex mtx;
 	struct workqueue_struct *write_wq; // used to defer writes
+	wait_queue_head_t read_wq; // used to implement blocking reads
 	unsigned long write_timeout; // 0 means immediate storing
 	unsigned long read_timeout; // 0 means non-blocking reads in the absence of messages
 	struct list_head pending_writes; // points to list of deferred writes
@@ -97,6 +99,7 @@ static int dev_open(struct inode *inodep, struct file *filep)
 	session_struct->write_timeout = 0;
 	session_struct->read_timeout = 0;
 	INIT_LIST_HEAD(&(session_struct->pending_writes));
+	init_waitqueue_head(&(session_struct->read_wq));
 	// Link the object to struct file
 	filep->private_data = (void *)session_struct;
 	
@@ -116,10 +119,13 @@ static int dev_release(struct inode *inodep, struct file *filep)
 	return 0;
 }
 
+// TODO possibly make it more modular
 static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp)
 {
-	int minor_idx;
+	int minor_idx, ret;
 	struct message_struct *msg;
+	struct session_struct *session = filep->private_data;
+	unsigned long read_timeout, to_sleep;
 		
 	minor_idx = iminor(filep->f_inode); // TODO possibly make it more portable using versioning
 	mutex_lock(&(minors[minor_idx].mtx));
@@ -127,32 +133,84 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	// Get the first message in the FIFO queue
 	msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                               struct message_struct, list);
-	if (msg == NULL) { // Empty queue
+	                               
+	if (msg != NULL) { // Not empty queue
+		
+		// Try to deliver the message to the user
+		if (len > msg->size) {
+			len = msg->size;
+		}
+	
+		if (copy_to_user(bufp, msg->buf, len)) {
+			mutex_unlock(&(minors[minor_idx].mtx));
+			return -EFAULT;
+		}
+	
+		// Dequeue the message only now, to avoid loss of messages
+		list_del(&(msg->list));
+		// Update the size of the device file
+		minors[minor_idx].current_size -= msg->size;
+	
 		mutex_unlock(&(minors[minor_idx].mtx));
+		kfree(msg->buf);
+		kfree(msg);
+	
+		return len;
+	}
+	
+	read_timeout = session->read_timeout;
+	mutex_unlock(&(minors[minor_idx].mtx));
+	
+	if (!read_timeout) { // Empty queue AND non-blocking read
 		return -EAGAIN;
 	}
 	
-	// Try to deliver the message to the user
-	if (len > msg->size) {
-		len = msg->size;
+	// Empty queue AND blocking read
+	// TODO to be modified after implementing flush()
+	to_sleep = read_timeout;
+	while (to_sleep) {
+		ret = wait_event_interruptible_timeout(session->read_wq, 
+		                                       !list_empty(&(minors[minor_idx].fifo)),
+		                                        to_sleep);
+		if (ret == -ERESTARTSYS) { // sleep interrupted by a signal
+			return ret;
+		}
+		if (ret == 0) { // empty list after timer expiration
+			return -ETIME;
+		}
+		// Check if the list is actually not empty
+		mutex_lock(&(minors[minor_idx].mtx));
+		msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
+	                                   struct message_struct, list);		
+		if (msg == NULL) { // the list is actually empty so return to sleep
+			mutex_unlock(&(minors[minor_idx].mtx));
+			to_sleep = ret;
+		} else { // a message is actually available
+			
+			// Try to deliver the message to the user
+			if (len > msg->size) {
+				len = msg->size;
+			}
+	
+			if (copy_to_user(bufp, msg->buf, len)) {
+				mutex_unlock(&(minors[minor_idx].mtx));
+				return -EFAULT;
+			}
+	
+			// Dequeue the message only now, to avoid loss of messages
+			list_del(&(msg->list));
+			// Update the size of the device file
+			minors[minor_idx].current_size -= msg->size;
+	
+			mutex_unlock(&(minors[minor_idx].mtx));
+			kfree(msg->buf);
+			kfree(msg);
+	
+			return len;
+		}
 	}
 	
-	if (copy_to_user(bufp, msg->buf, len)) {
-		mutex_unlock(&(minors[minor_idx].mtx));
-		return -EFAULT;
-	}
-	
-	// Dequeue the message only now, to avoid loss of messages
-	list_del(&(msg->list));
-	// Update the size of the device file
-	minors[minor_idx].current_size -= msg->size;
-	
-	mutex_unlock(&(minors[minor_idx].mtx));
-	kfree(msg->buf);
-	kfree(msg);
-	
-	return len;
-	
+	return 0; // never reached TODO refactor function structure
 }
 
 // TODO possibly centralize error mgmt
@@ -200,7 +258,8 @@ static void deferred_write(struct work_struct *work_struct)
 	
 	// Update device file size
 	minors[pending_write->minor].current_size += pending_write->len;
-	
+	// Awake blocking readers
+	wake_up_interruptible(&(pending_write->session->read_wq));
 	mutex_unlock(&(minors[pending_write->minor].mtx));
 	
 	kfree(pending_write);
@@ -272,10 +331,10 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 		INIT_DELAYED_WORK(&(pending_write->delayed_work), deferred_write);
 		// Add the object to the list of pending writes linked to the session
 		list_add_tail(&(pending_write->list),&(session->pending_writes));
-		mutex_unlock(&(session->mtx));
 		// Defer the write using the write workqueue
 		queue_delayed_work(session->write_wq, &(pending_write->delayed_work), 
 		                   session->write_timeout);
+		mutex_unlock(&(session->mtx));
 		return 0; // no byte actually written                                                 
 	}
 	
@@ -305,7 +364,8 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	
 	// Update device file size
 	minors[minor_idx].current_size += len;
-	
+	// Awake blocking readers	
+	wake_up_interruptible(&(session->read_wq));
 	mutex_unlock(&(minors[minor_idx].mtx));
 	
 	return len;
