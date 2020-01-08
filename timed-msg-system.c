@@ -307,6 +307,28 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	return ret;
 }
 
+static void revoke_delayed_messages(struct session_struct *session)
+{
+	struct list_head *ptr;
+	struct list_head *tmp;
+	struct pending_write_struct *pending_write;
+
+	mutex_lock(&(session->mtx));
+	// Scan pending writes
+	list_for_each_safe(ptr, tmp, &(session->pending_writes)) {
+		pending_write = list_entry(ptr, struct pending_write_struct, list);
+		// Cancel delayed write
+		// NOTE that the pending write may be actually already in execution
+		// thus we have to check return value
+		if (cancel_delayed_work(&(pending_write->delayed_work))) {
+			list_del(&(pending_write->list));
+			kfree(pending_write->kbuf);
+			kfree(pending_write);
+		}
+	}
+	mutex_unlock(&(session->mtx));
+}
+
 // TODO possibly provide a more fine-grained timeout mechanism
 /**
 * dev_ioctl - modify the operating mode of read() and write()
@@ -332,9 +354,6 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct session_struct *session = (struct session_struct *)filep->private_data;
-	struct list_head *ptr;
-	struct list_head *tmp;
-	struct pending_write_struct *pending_write;
 
 	switch (cmd) {
 		case SET_SEND_TIMEOUT:
@@ -348,20 +367,7 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 			mutex_unlock(&(session->mtx));
 			break;
 		case REVOKE_DELAYED_MESSAGES:
-			mutex_lock(&(session->mtx));
-			// Scan pending writes
-			list_for_each_safe(ptr, tmp, &(session->pending_writes)) {
-				pending_write = list_entry(ptr, struct pending_write_struct, list);
-				// Cancel delayed write
-				// NOTE that the pending write may be actually already in execution
-				// thus we have to check return value
-				if (cancel_delayed_work(&(pending_write->delayed_work))) {
-					list_del(&(pending_write->list));
-					kfree(pending_write->kbuf);
-					kfree(pending_write);
-				}
-			}
-			mutex_unlock(&(session->mtx));
+			revoke_delayed_messages(session);
 			break;
 		default:
 			printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);
