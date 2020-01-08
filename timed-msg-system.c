@@ -30,6 +30,7 @@ static struct minor_struct minors[MINORS];
 static int dev_open(struct inode *inodep, struct file *filep)
 {
 	struct session_struct *session_struct;
+	int minor_idx;
 	
 	// Allocate a session_struct object
 	session_struct = kmalloc(sizeof(struct session_struct), GFP_KERNEL);
@@ -48,23 +49,15 @@ static int dev_open(struct inode *inodep, struct file *filep)
 	session_struct->read_timeout = 0;
 	INIT_LIST_HEAD(&(session_struct->pending_writes));
 	INIT_LIST_HEAD(&(session_struct->pending_reads));
+	INIT_LIST_HEAD(&(session_struct->list));
 	init_waitqueue_head(&(session_struct->read_wq));
 	// Link the object to struct file
 	filep->private_data = (void *)session_struct;
-	
-	return 0;
-}
-
-// TODO possibly modify it after implementing dev_flush()
-static int dev_release(struct inode *inodep, struct file *filep)
-{
-	struct session_struct *session_struct;
-	
-	// Deallocate session_struct object linked to struct file
-	session_struct = (struct session_struct *)filep->private_data;
-	destroy_workqueue(session_struct->write_wq);
-	kfree(session_struct);	
-	
+	// Link the object to minor_struct
+	minor_idx = iminor(inodep);
+	mutex_lock(&(minors[minor_idx].mtx));
+	list_add_tail(&(session_struct->list), &(minors[minor_idx].sessions));
+	mutex_unlock(&(minors[minor_idx].mtx));	
 	return 0;
 }
 
@@ -383,6 +376,26 @@ static int dev_flush(struct file *filep, fl_owner_t id)
 	return 0;
 }
 
+// TODO possibly modify it after implementing dev_flush()
+static int dev_release(struct inode *inodep, struct file *filep)
+{
+	struct session_struct *session_struct;
+	int minor_idx;
+	
+	// Deallocate session_struct object linked to struct file
+	session_struct = (struct session_struct *)filep->private_data;
+	destroy_workqueue(session_struct->write_wq);
+	// Unlink session_struct from minor_struct
+	minor_idx = iminor(inodep);
+	mutex_lock(&(minors[minor_idx].mtx));
+	list_del(&(session_struct->list));
+	mutex_unlock(&(minors[minor_idx].mtx));
+	
+	kfree(session_struct);	
+	
+	return 0;
+}
+
 static struct file_operations fops = 
 {
 	.owner = THIS_MODULE,
@@ -394,8 +407,6 @@ static struct file_operations fops =
 	.flush = dev_flush,
 };
 
-
-
 static int __init install_driver(void)
 {
 	int i;
@@ -405,6 +416,7 @@ static int __init install_driver(void)
 		minors[i].current_size = 0;
 		mutex_init(&(minors[i].mtx));
 		INIT_LIST_HEAD(&(minors[i].fifo));
+		INIT_LIST_HEAD(&(minors[i].sessions));
 	}
 	
 	// driver registration

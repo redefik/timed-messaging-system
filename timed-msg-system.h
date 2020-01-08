@@ -25,6 +25,7 @@ struct minor_struct {
 	unsigned int current_size; // must be <= max_storage_size
 	struct mutex mtx;
 	struct list_head fifo; // points to the FIFO queue of message_struct
+	struct list_head sessions; // open I/O sessions
 };
 
 // Represents a deferred write
@@ -52,6 +53,7 @@ struct session_struct {
 	unsigned long read_timeout; // 0 means non-blocking reads in the absence of messages
 	struct list_head pending_writes; // points to list of deferred writes
 	struct list_head pending_reads; // points to list of pending reads
+	struct list_head list; // used to concatenate nodes in a list of sessions related to a an instance of the device file
 };
 
 // Supported file operations
