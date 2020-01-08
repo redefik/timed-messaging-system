@@ -143,48 +143,30 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                               struct message_struct, list);
 	                               
-	if (msg != NULL) { // Not empty queue
-		
-		// Try to deliver the message to the user
-		if (len > msg->size) {
-			len = msg->size;
-		}
-	
-		if (copy_to_user(bufp, msg->buf, len)) {
-			mutex_unlock(&(minors[minor_idx].mtx));
-			return -EFAULT;
-		}
-	
-		// Dequeue the message only now, to avoid loss of messages
-		list_del(&(msg->list));
-		// Update the size of the device file
-		minors[minor_idx].current_size -= msg->size;
-	
-		mutex_unlock(&(minors[minor_idx].mtx));
-		kfree(msg->buf);
-		kfree(msg);
-	
-		return len;
+	if (msg != NULL) { // Not empty queue		
+		goto deliver_message;
 	}
 	
-	mutex_unlock(&(minors[minor_idx].mtx));
+	// Empty queue
 	
+	mutex_unlock(&(minors[minor_idx].mtx));	
 	mutex_lock(&(session->mtx));
 	read_timeout = session->read_timeout;
 	mutex_unlock(&(session->mtx));
 	
-	if (!read_timeout) { // Empty queue AND non-blocking read
+	if (!read_timeout) { // Non-blocking read
 		return -EAGAIN;
 	}
 	
-	// Empty queue AND blocking read
+	// Blocking read
+	
 	to_sleep = read_timeout;
 	// Allocate a pending_read_struct object
 	pending_read = kmalloc(sizeof(struct pending_read_struct), GFP_KERNEL);
 	if (pending_read == NULL) {
 		return -ENOMEM;
 	}
-	// Initialize the object
+	// Initialize a pending_read_struct
 	pending_read->msg_available = 0;
 	INIT_LIST_HEAD(&(pending_read->list));
 	// Insert the object in the queue of the pending reads
@@ -193,63 +175,55 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	mutex_unlock(&(session->mtx));
 	
 	// TODO to be modified after implementing flush()
+	// Go to sleep waiting for available messages
 	while (to_sleep) {
 		ret = wait_event_interruptible_timeout(session->read_wq, 
 		                                       pending_read->msg_available,
 		                                       to_sleep);
 		if (ret == -ERESTARTSYS) { // sleep interrupted by a signal
-			mutex_lock(&(session->mtx));
-			list_del(&(pending_read->list));
-			mutex_unlock(&(session->mtx));
-			kfree(pending_read);
-			return ret;
+			goto remove_pending_read;
 		}
 		if (ret == 0) { // empty list after timer expiration
-			// Remove pending read from the corresponding queue
-			mutex_lock(&(session->mtx));
-			list_del(&(pending_read->list));
-			mutex_unlock(&(session->mtx));
-			kfree(pending_read);
-			return -ETIME;
+			ret = -ETIME;
+			goto remove_pending_read;
 		}
 		// Check if the list is actually not empty
 		mutex_lock(&(minors[minor_idx].mtx));
 		msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                                   struct message_struct, list);		
 		if (msg == NULL) { // the list is actually empty so return to sleep
+			mutex_unlock(&(minors[minor_idx].mtx));
 			pending_read->msg_available = 0;
 			mutex_lock(&(session->mtx));
 			list_add_tail(&(pending_read->list), &(session->pending_reads));
 			mutex_unlock(&(session->mtx));
-			mutex_unlock(&(minors[minor_idx].mtx));
 			to_sleep = ret;
 		} else { // a message is actually available
-			
-			// Try to deliver the message to the user
-			if (len > msg->size) {
-				len = msg->size;
-			}
-	
-			if (copy_to_user(bufp, msg->buf, len)) {
-				mutex_unlock(&(minors[minor_idx].mtx));
-				return -EFAULT;
-			}
-	
-			// Dequeue the message only now, to avoid loss of messages
-			list_del(&(msg->list));
-			// Update the size of the device file
-			minors[minor_idx].current_size -= msg->size;
-	
-			mutex_unlock(&(minors[minor_idx].mtx));
-			kfree(msg->buf);
-			kfree(msg);
 			kfree(pending_read);
-	
-			return len;
+			goto deliver_message;
 		}
 	}
-	
-	return 0; // never reached TODO refactor function structure
+
+deliver_message:
+	if (len > msg->size) {
+		len = msg->size;
+	}
+	if (copy_to_user(bufp, msg->buf, len)) {
+		mutex_unlock(&(minors[minor_idx].mtx));
+		return -EFAULT;
+	}
+	list_del(&(msg->list));
+	minors[minor_idx].current_size -= msg->size;
+	mutex_unlock(&(minors[minor_idx].mtx));
+	kfree(msg->buf);
+	kfree(msg);
+	return len;
+remove_pending_read:
+	mutex_lock(&(session->mtx));
+	list_del(&(pending_read->list));
+	mutex_unlock(&(session->mtx));
+	kfree(pending_read);
+	return ret;	
 }
 
 // TODO possibly centralize error mgmt
