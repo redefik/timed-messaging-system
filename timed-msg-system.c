@@ -127,7 +127,6 @@ static int dev_release(struct inode *inodep, struct file *filep)
 	return 0;
 }
 
-// TODO possibly make it more modular
 static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp)
 {
 	int minor_idx, ret;
@@ -152,9 +151,9 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	mutex_unlock(&(minors[minor_idx].mtx));	
 	mutex_lock(&(session->mtx));
 	read_timeout = session->read_timeout;
-	mutex_unlock(&(session->mtx));
 	
 	if (!read_timeout) { // Non-blocking read
+		mutex_unlock(&(session->mtx));
 		return -EAGAIN;
 	}
 	
@@ -170,7 +169,6 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	pending_read->msg_available = 0;
 	INIT_LIST_HEAD(&(pending_read->list));
 	// Insert the object in the queue of the pending reads
-	mutex_lock(&(session->mtx));
 	list_add_tail(&(pending_read->list), &(session->pending_reads));
 	mutex_unlock(&(session->mtx));
 	
@@ -226,13 +224,53 @@ remove_pending_read:
 	return ret;	
 }
 
-// TODO possibly centralize error mgmt
+// TODO Consider the possibility to make it an inline function to reduce overhead
+static int post_message(int minor_idx, char *kbuf, size_t len)
+{
+	struct message_struct *msg;
+	
+	mutex_lock(&(minors[minor_idx].mtx));
+	if (minors[minor_idx].current_size + len > max_storage_size) {
+		mutex_unlock(&(minors[minor_idx].mtx));
+		kfree(kbuf);
+		return -EAGAIN;
+	}
+	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
+	if (msg == NULL) {
+		mutex_unlock(&(minors[minor_idx].mtx));
+		kfree(kbuf);
+		return -ENOMEM;
+	}
+	msg->size = len;
+	msg->buf = kbuf;
+	INIT_LIST_HEAD(&(msg->list));
+	list_add_tail(&(msg->list),&(minors[minor_idx].fifo));
+	minors[minor_idx].current_size += len;
+	mutex_unlock(&(minors[minor_idx].mtx));
+	return len;
+}
+
+// TODO Consider make it inlined
+static void awake_pending_reader(struct session_struct *session)
+{
+	struct pending_read_struct *pending_read;
+	
+	mutex_lock(&(session->mtx));
+	pending_read = list_first_entry_or_null(&(session->pending_reads), 
+	                                        struct pending_read_struct, list);
+	if (pending_read) {
+		list_del(&(pending_read->list));
+		pending_read->msg_available = 1;
+		wake_up_interruptible(&(session->read_wq));
+	}
+	mutex_unlock(&(session->mtx));
+}
+
 static void deferred_write(struct work_struct *work_struct)
 {
+	int ret;
 	struct delayed_work *delayed_work;
 	struct pending_write_struct *pending_write;
-	struct message_struct *msg;
-	struct pending_read_struct *pending_read;
 	
 	// work_struct is embedded in a struct delayed_work (work field)
 	// delayed_work is embedded in a struct pending_write_struct
@@ -245,52 +283,16 @@ static void deferred_write(struct work_struct *work_struct)
 	list_del(&(pending_write->list));
 	mutex_unlock(&(pending_write->session->mtx));
 	
-	mutex_lock(&(minors[pending_write->minor].mtx));
-
-	if (minors[pending_write->minor].current_size + pending_write->len > max_storage_size) {
-		mutex_unlock(&(minors[pending_write->minor].mtx));
-		kfree(pending_write->kbuf);
-		kfree(pending_write);
-		return; // device file is temporary full
-	}
+	ret = post_message(pending_write->minor, 
+	                   pending_write->kbuf, pending_write->len);
+	if (ret >= 0) { // message post succeeded
+		awake_pending_reader(pending_write->session);
+	}	
 	
-	// Allocate a message_struct
-	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
-	if (msg == NULL) {
-		mutex_unlock(&(minors[pending_write->minor].mtx));
-		kfree(pending_write->kbuf);
-		kfree(pending_write);
-		return;
-	}
-	
-	// Initialize the message_struct
-	msg->buf = pending_write->kbuf;
-	msg->size = pending_write->len;
-	INIT_LIST_HEAD(&(msg->list));
-	// Enqueue the message_struct
-	list_add_tail(&(msg->list), &(minors[pending_write->minor].fifo));
-	
-	// Update device file size
-	minors[pending_write->minor].current_size += pending_write->len;
-	mutex_unlock(&(minors[pending_write->minor].mtx));	
-	
-	// Awake blocking a blocking reader if present
-	mutex_lock(&(pending_write->session->mtx));
-	pending_read = list_first_entry_or_null(&(pending_write->session->pending_reads), 
-	                                        struct pending_read_struct, list);
-	if (pending_read) {
-		list_del(&(pending_read->list));
-		pending_read->msg_available = 1;
-		wake_up_interruptible(&(pending_write->session->read_wq));
-	}
-	
-	mutex_unlock(&(pending_write->session->mtx));
-	kfree(pending_write);
-		
+	kfree(pending_write);		
 	return;
 }
 
-// TODO possibly centralize error management
 /**
  * dev_write - Write a message into the device file
  * @filep: pointer to struct file
@@ -313,10 +315,8 @@ static void deferred_write(struct work_struct *work_struct)
 static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_t *offp)
 {
 	char *kbuf;
-	int minor_idx;
-	struct message_struct *msg;
+	int minor_idx, ret;
 	struct pending_write_struct *pending_write;
-	struct pending_read_struct *pending_read;
 	struct session_struct *session = (struct session_struct *)filep->private_data;
 
 	if (len > max_message_size) {
@@ -364,45 +364,13 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	
 	mutex_unlock(&(session->mtx));
 	
-	mutex_lock(&(minors[minor_idx].mtx));
-	
-	if (minors[minor_idx].current_size + len > max_storage_size) {
-		mutex_unlock(&(minors[minor_idx].mtx));
-		kfree(kbuf);
-		return -EAGAIN; // device file is temporary full
+	// Immediate write
+	ret = post_message(minor_idx, kbuf, len);
+	if (ret >= 0) { // message post succeeded
+		awake_pending_reader(session);
 	}
 	
-	// Allocate a message_struct
-	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
-	if (msg == NULL) {
-		mutex_unlock(&(minors[minor_idx].mtx));
-		kfree(kbuf);
-		return -ENOMEM;
-	}
-	// Initialize the message_struct
-	msg->size = len;
-	msg->buf = kbuf;
-	INIT_LIST_HEAD(&(msg->list));
-	// Enqueue the message_struct
-	list_add_tail(&(msg->list), &(minors[minor_idx].fifo));
-	
-	// Update device file size
-	minors[minor_idx].current_size += len;
-	mutex_unlock(&(minors[minor_idx].mtx));
-
-	// Awake a blocking reader if present
-	mutex_lock(&(session->mtx));
-	pending_read = list_first_entry_or_null(&(session->pending_reads), 
-	                                        struct pending_read_struct, list);
-	if (pending_read) {
-		list_del(&(pending_read->list));
-		pending_read->msg_available = 1;
-		wake_up_interruptible(&(session->read_wq));
-	}
-	
-	mutex_unlock(&(session->mtx));
-	
-	return len;
+	return ret;
 }
 
 // TODO possibly provide a more fine-grained timeout mechanism
