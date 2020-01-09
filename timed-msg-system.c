@@ -356,29 +356,41 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 	struct session_struct *session = (struct session_struct *)filep->private_data;
 
 	switch (cmd) {
-		case SET_SEND_TIMEOUT:
-			mutex_lock(&(session->mtx));
-			session->write_timeout = (arg * HZ)/1000;
-			mutex_unlock(&(session->mtx));
-			break;
-		case SET_RECV_TIMEOUT:
-			mutex_lock(&(session->mtx));
-			session->read_timeout = (arg * HZ)/1000;
-			mutex_unlock(&(session->mtx));
-			break;
-		case REVOKE_DELAYED_MESSAGES:
-			revoke_delayed_messages(session);
-			break;
-		default:
-			printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);
-			return -ENOTTY;
+	case SET_SEND_TIMEOUT:
+		mutex_lock(&(session->mtx));
+		session->write_timeout = (arg * HZ)/1000;
+		mutex_unlock(&(session->mtx));
+		break;
+	case SET_RECV_TIMEOUT:
+		mutex_lock(&(session->mtx));
+		session->read_timeout = (arg * HZ)/1000;
+		mutex_unlock(&(session->mtx));
+		break;
+	case REVOKE_DELAYED_MESSAGES:
+		revoke_delayed_messages(session);
+		break;
+	default:
+		printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);
+		return -ENOTTY;
 	}
 	return 0;
 }
 
 static int dev_flush(struct file *filep, fl_owner_t id)
 {
-	// TODO
+	int minor_idx;
+	struct list_head *ptr;
+	struct session_struct *session;
+	
+	minor_idx = iminor(filep->f_inode); // TODO possibly make it more portable
+	mutex_lock(&(minors[minor_idx].mtx));
+	// Revoke delayed writes
+	list_for_each(ptr, &(minors[minor_idx].sessions)) {
+		session = list_entry(ptr, struct session_struct, list);
+		revoke_delayed_messages(session);
+	}
+	mutex_unlock(&(minors[minor_idx].mtx));
+	
 	return 0;
 }
 
@@ -390,6 +402,9 @@ static int dev_release(struct inode *inodep, struct file *filep)
 	
 	// Deallocate session_struct object linked to struct file
 	session_struct = (struct session_struct *)filep->private_data;
+	// Wait for delayed write in execution (not canceled by dev_flush) to complete...
+	flush_workqueue(session_struct->write_wq);
+	// ...Now the workqueue can be safely destroyed
 	destroy_workqueue(session_struct->write_wq);
 	// Unlink session_struct from minor_struct
 	minor_idx = iminor(inodep);
