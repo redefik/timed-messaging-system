@@ -1,3 +1,11 @@
+/*
+* @brief This module provides a device file that allows exchanging messages
+*        across threads
+* @author Federico Viglietta
+* @date January 10, 2019
+*/
+
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/moduleparam.h>
@@ -15,19 +23,16 @@
 #include <linux/version.h>
 #include "timed-msg-system.h" 
 
-// root-configurable parameters
+/* Parameters reconfigurable by root */
 static unsigned int max_message_size = MAX_MSG_SIZE_DEFAULT; 
 module_param(max_message_size, uint, S_IRUGO | S_IWUSR);
 static unsigned int max_storage_size = MAX_STORAGE_SIZE_DEFAULT;
 module_param(max_storage_size, uint, S_IRUGO | S_IWUSR);
 
-static int major; // dinamically allocated by the kernel
-#ifdef TEST
-module_param(major, int, S_IRUGO | S_IWUSR);
-#endif
+static int major;
 static struct minor_struct minors[MINORS];
 
-// For minor number retrieval
+/* Portable minor number retrieval */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
 #define fminor(filep) iminor(filep->f_inode)
 #else
@@ -39,12 +44,12 @@ static int dev_open(struct inode *inodep, struct file *filep)
 	struct session_struct *session_struct;
 	int minor_idx;
 	
-	// Allocate a session_struct object
+	/* Allocate a session_struct */
 	session_struct = kmalloc(sizeof(struct session_struct), GFP_KERNEL);
 	if (session_struct == NULL) {
 		return -ENOMEM;
 	}
-	// Initalize the object
+	/* Initialize the session_struct */
 	mutex_init(&(session_struct->mtx));
 	session_struct->write_wq = alloc_workqueue(WRITE_WORK_QUEUE, 
 	                                           WQ_MEM_RECLAIM, 0);
@@ -56,9 +61,9 @@ static int dev_open(struct inode *inodep, struct file *filep)
 	session_struct->read_timeout = 0;
 	INIT_LIST_HEAD(&(session_struct->pending_writes));
 	INIT_LIST_HEAD(&(session_struct->list));
-	// Link the object to struct file
+	/* Link the session_struct to the struct file */
 	filep->private_data = (void *)session_struct;
-	// Link the object to minor_struct
+	/* Link the session_struct to the minor_struct */
 	minor_idx = iminor(inodep);
 	mutex_lock(&(minors[minor_idx].mtx));
 	list_add_tail(&(session_struct->list), &(minors[minor_idx].sessions));
@@ -78,71 +83,72 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	minor_idx = fminor(filep);
 	mutex_lock(&(minors[minor_idx].mtx));
 	
-	// Get the first message in the FIFO queue
+	/* Retrieve the first message stored in the device file */
 	msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                               struct message_struct, list);
 	                               
-	if (msg != NULL) { // Not empty queue		
+	if (msg != NULL) { /* Not empty queue */		
 		goto deliver_message;
 	}
 	
-	// Empty queue
+	/* Empty queue*/
 	mutex_unlock(&(minors[minor_idx].mtx));	
 	mutex_lock(&(session->mtx));
 	read_timeout = session->read_timeout;
 	mutex_unlock(&(session->mtx));
-	if (!read_timeout) { // Non-blocking read
+	if (!read_timeout) { /* Non-blocking read */
 		return -EAGAIN;
 	}
 	
-	// Blocking read
+	/* Blocking read */
 	to_sleep = read_timeout;
-	// Allocate a pending_read_struct object
+	/* Allocate a pending_read_struct */
 	pending_read = kmalloc(sizeof(struct pending_read_struct), GFP_KERNEL);
 	if (pending_read == NULL) {
 		return -ENOMEM;
 	}
-	// Initialize a pending_read_struct
+	/* Initialize the pending_read_struct */
 	pending_read->msg_available = 0;
 	pending_read->flushing = 0;
 	INIT_LIST_HEAD(&(pending_read->list));
 	mutex_lock(&(minors[minor_idx].mtx));
-	// Insert the object in the queue of the pending reads
+	/* Enqueue the pending read to the others */
 	list_add_tail(&(pending_read->list), &(minors->pending_reads));
 	mutex_unlock(&(minors[minor_idx].mtx));
 	
-	// Go to sleep waiting for available messages
+	/* Go to sleep waiting for available messages */
 	while (to_sleep) {
 		ret = wait_event_interruptible_timeout(minors[minor_idx].read_wq, 
 		                                       pending_read->msg_available || pending_read->flushing,
 		                                       to_sleep);
-		if (ret == -ERESTARTSYS) { // sleep interrupted by a signal
+		if (ret == -ERESTARTSYS) { /* signal delivered during sleep */
 			if (pending_read->msg_available || pending_read->flushing) {
 				goto free_pending_read;
 			} else {
 				goto remove_pending_read;
 			}
 		}
-		if (ret == 0) { // empty list after timer expiration
+		if (ret == 0) { /* empty list after timer expiration */
 			ret = -ETIME;
 			goto remove_pending_read;
 		}
-		if (pending_read->flushing) { // dev_flush() has been invoked
+		if (pending_read->flushing) { /* dev_flush() invoked */
 			ret = -ECANCELED;
 			goto free_pending_read;
 		}
-		// A message should be available
-		// Check if the list is actually not empty
+		/* A message should be available */
+		
+		/* Check if the list is actually not empty */
 		mutex_lock(&(minors[minor_idx].mtx));
 		msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                                   struct message_struct, list);		
-		if (msg == NULL) { // the list is actually empty so return to sleep
+		if (msg == NULL) { /* list actually empty, return to sleep */
 			pending_read->msg_available = 0;
 			list_add_tail(&(pending_read->list), 
 				      &(minors[minor_idx].pending_reads));
 			mutex_unlock(&(minors[minor_idx].mtx));
 			to_sleep = ret;
-		} else { // a message is actually available
+		} else { /* message actually available */
 			kfree(pending_read);
 			goto deliver_message;
 		}
@@ -171,7 +177,6 @@ free_pending_read:
 	return ret;	
 }
 
-// TODO Consider the possibility to make it an inline function to reduce overhead
 /**
 * __post_message - Actually write a message into a device file
 * 
@@ -207,7 +212,6 @@ static int __post_message(struct minor_struct *minor, char *kbuf, size_t len)
 	return len;
 }
 
-// TODO Consider make it inlined
 /**
 * __awake_pending_reader - Awakes a reader waiting for messages
 * 
@@ -246,7 +250,7 @@ static void __deferred_write(struct work_struct *work_struct)
 	delayed_work = container_of(work_struct, struct delayed_work, work);
 	pending_write = container_of(delayed_work, struct pending_write_struct, 
 	                                           delayed_work);
-	// Remove the deferred work from the list of pending writes
+	/* Dequeue from the list of pending writes */
 	mutex_lock(&(pending_write->session->mtx));
 	list_del(&(pending_write->list));
 	mutex_unlock(&(pending_write->session->mtx));
@@ -254,7 +258,7 @@ static void __deferred_write(struct work_struct *work_struct)
 	mutex_lock(&(minors[pending_write->minor].mtx));
 	ret = __post_message(&minors[pending_write->minor], 
 	                   pending_write->kbuf, pending_write->len);
-	if (ret >= 0) { // message post succeeded
+	if (ret >= 0) { /* message post succeeded */
 		__awake_pending_reader(&(minors[pending_write->minor]));
 	}
 	mutex_unlock(&(minors[pending_write->minor].mtx));	
@@ -276,13 +280,13 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 		return -EMSGSIZE;
 	}
 
-	// Allocate a kernel buffer
+	/* Allocate a kernel buffer */
 	kbuf = kmalloc(len, GFP_KERNEL);
 	if (kbuf == NULL) {
 		return -ENOMEM;
 	}	
 	
-	// Copy the message in the kernel buffer
+	/* Copy the message in the kernel buffer */
 	if (copy_from_user(kbuf, bufp, len)) {
 		kfree(kbuf);
 		return -EFAULT;
@@ -290,9 +294,8 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	
 	minor_idx = fminor(filep);
 	mutex_lock(&(session->mtx));
-	if (session->write_timeout) { // a write timeout exists
-		// TODO here possible refactoring
-		// Allocate a pending_write_struct object
+	if (session->write_timeout) { /* a write timeout exists */		
+		/* Allocate a pending_write_struct */
 		pending_write = kmalloc(sizeof(struct pending_write_struct), 
 		                        GFP_KERNEL);
 		if (pending_write == NULL) {
@@ -300,29 +303,28 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 			mutex_unlock(&(session->mtx));
 			return -ENOMEM;
 		}
-		// Initialize the object
+		/* Initialize the pending_write_struct */
 		pending_write->minor = minor_idx;
 		pending_write->session = session;
 		pending_write->kbuf = kbuf;
 		pending_write->len = len;
 		INIT_LIST_HEAD(&(pending_write->list));
 		INIT_DELAYED_WORK(&(pending_write->delayed_work), __deferred_write);
-		// Add the object to the list of pending writes linked to the session
+		/* Enqueue the pending write to the list of the others */
 		list_add_tail(&(pending_write->list),&(session->pending_writes));
-		// Defer the write using the write workqueue
 		queue_delayed_work(session->write_wq, 
 		                   &(pending_write->delayed_work), 
 		                   session->write_timeout);
 		mutex_unlock(&(session->mtx));
-		return 0; // no byte actually written                                                 
+		return 0; /* no byte actually written */                                                 
 	}
 	
 	mutex_unlock(&(session->mtx));
 	
-	// Immediate write
+	/* Immediate storing */
 	mutex_lock(&(minors[minor_idx].mtx));
 	ret = __post_message(&minors[minor_idx], kbuf, len);
-	if (ret >= 0) { // message post succeeded
+	if (ret >= 0) { /* message post succeeded */
 		__awake_pending_reader(&(minors[minor_idx]));
 	}
 	mutex_unlock(&(minors[minor_idx].mtx));
@@ -342,13 +344,12 @@ static void __revoke_delayed_messages(struct session_struct *session)
 	struct list_head *tmp;
 	struct pending_write_struct *pending_write;
 
-	// Scan pending writes
 	list_for_each_safe(ptr, tmp, &(session->pending_writes)) {
 		pending_write = list_entry(ptr, struct pending_write_struct, 
 		                           list);
-		// Cancel delayed write
-		// NOTE that the pending write may be actually already in execution
-		// thus we have to check return value
+
+		/* NOTE that the pending write may be actually already in execution
+		   thus we have to check return value */
 		if (cancel_delayed_work(&(pending_write->delayed_work))) {
 			list_del(&(pending_write->list));
 			kfree(pending_write->kbuf);
@@ -416,14 +417,14 @@ static int dev_flush(struct file *filep, fl_owner_t id)
 	
 	minor_idx = fminor(filep);
 	mutex_lock(&(minors[minor_idx].mtx));
-	// Revoke delayed writes
+	/* Revoke delayed writes */
 	list_for_each(ptr, &(minors[minor_idx].sessions)) {
 		session = list_entry(ptr, struct session_struct, list);
 		mutex_lock(&(session->mtx));
 		__revoke_delayed_messages(session);
 		mutex_unlock(&(session->mtx));
 	}
-	// Readers waiting for messages are unblocked
+	/* Readers waiting for messages are unblocked */
 	__unblock_reads(&(minors[minor_idx]));
 	mutex_unlock(&(minors[minor_idx].mtx));
 	
@@ -435,13 +436,11 @@ static int dev_release(struct inode *inodep, struct file *filep)
 	struct session_struct *session_struct;
 	int minor_idx;
 	
-	// Deallocate session_struct object linked to struct file
 	session_struct = (struct session_struct *)filep->private_data;
-	// Wait for delayed write in execution to complete...
+	/* Wait for delayed write in execution to complete */
 	flush_workqueue(session_struct->write_wq);
-	// ...Now the workqueue can be safely destroyed
 	destroy_workqueue(session_struct->write_wq);
-	// Unlink session_struct from minor_struct
+	/* Unlink session_struct from minor_struct */
 	minor_idx = iminor(inodep);
 	mutex_lock(&(minors[minor_idx].mtx));
 	list_del(&(session_struct->list));
@@ -467,7 +466,7 @@ static int __init install_driver(void)
 {
 	int i;
 	
-	//Initialization of minor_struct array
+	/* Initialization of minor_struct array */
 	for (i = 0; i < MINORS; i++) {
 		minors[i].current_size = 0;
 		mutex_init(&(minors[i].mtx));
@@ -477,7 +476,7 @@ static int __init install_driver(void)
 		INIT_LIST_HEAD(&(minors[i].sessions));
 	}
 	
-	// driver registration
+	/* Driver registration */
 	major = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &fops);
 	if (major < 0) {
 		printk(KERN_INFO "%s: Driver installation failed\n", MODNAME);
@@ -498,7 +497,7 @@ static void __exit uninstall_driver(void)
 	
 	for (i = 0; i < MINORS; i++) {
 		mutex_lock(&(minors[i].mtx));
-		// flush FIFO queue
+		/* Flush content of the device files */
 		list_for_each_safe(ptr, tmp, &(minors[i].fifo)) {
 			msg = list_entry(ptr, struct message_struct, list);
 			list_del(&(msg->list));
@@ -508,7 +507,7 @@ static void __exit uninstall_driver(void)
 		mutex_unlock(&(minors[i].mtx));
 	}
 	
-	// driver unregistration
+	/* Driver unregistration */
 	unregister_chrdev(major, DEVICE_NAME);
 	printk(KERN_INFO "%s: Driver correctly uninstalled\n", MODNAME);
 	return;
@@ -519,4 +518,4 @@ module_exit(uninstall_driver);
 
 MODULE_AUTHOR("Federico Viglietta");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("The module provides a device file that allows exchanging messages across threads");//TODO refine DESCRIPTION
+MODULE_DESCRIPTION("This module provides a device file that allows exchanging messages across threads");
