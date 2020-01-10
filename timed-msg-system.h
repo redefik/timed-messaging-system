@@ -1,63 +1,81 @@
 #include <linux/ioctl.h>
 
-#define MAGIC_BASE 'k' // NOTE it should be unique across the system
+/******************************ioctl() commands*********************************/
+
+#define MAGIC_BASE 'k' /* NOTE This should be unique */
 #define SET_SEND_TIMEOUT _IO(MAGIC_BASE, 0)
 #define SET_RECV_TIMEOUT _IO(MAGIC_BASE, 1)
 #define REVOKE_DELAYED_MESSAGES _IO(MAGIC_BASE, 2)
+
+/**********************************kernel part**********************************/
 
 #ifdef __KERNEL__
 #define TEST // comment in "production"
 
 #define MODNAME "TIMED-MSG-SYSTEM"
 #define DEVICE_NAME "timed-msg-device"
-#define MINORS 3 // supported minor numbers
-#define MAX_MSG_SIZE_DEFAULT 4096 // bytes
-#define MAX_STORAGE_SIZE_DEFAULT 65536 // bytes
-#define WRITE_WORK_QUEUE "wq-timed-msg-system"// Represents a node of the FIFO queue containing messages
+#define MINORS 3
+#define MAX_MSG_SIZE_DEFAULT 4096      /* bytes */
+#define MAX_STORAGE_SIZE_DEFAULT 65536 /* bytes */
+#define WRITE_WORK_QUEUE "wq-timed-msg-system"
+
+/******************************Data Structures**********************************/
+
+/**
+* message_struct - Message stored in an instance of the device file
+*/
 struct message_struct {
-	unsigned int size; // must be <= max_message_size
-	char *buf; // points to the buffer containing the message
-	struct list_head list; // used to concatenate nodes of the FIFO queue
+	unsigned int size;
+	char *buf;
+	struct list_head list;
 };
 
-// Represents an istance of the device file
+/**
+* minor_struct - Instance of a device file
+*/
 struct minor_struct {
-	unsigned int current_size; // must be <= max_storage_size
+	unsigned int current_size;
 	struct mutex mtx;
-	struct list_head fifo; // points to the FIFO queue of message_struct
-	struct list_head sessions; // open I/O sessions
-	struct list_head pending_reads; // points to list of pending reads
-	wait_queue_head_t read_wq; // used to implement blocking reads
+	struct list_head fifo;          /* Messages stored in the device file */
+	struct list_head sessions;
+	struct list_head pending_reads; 
+	wait_queue_head_t read_wq;      /* Used from blocking readers to wait for messages */
 };
 
-// Represents a deferred write
+/**
+* pending_write_struct - Delayed write information
+*/
 struct pending_write_struct {
-	int minor; // instance of the device file involved in the write
-	struct session_struct *session; // session involved in the write
-	char *kbuf; // temporary buffer containing the message to write
-	unsigned int len; // message length
+	int minor;
+	struct session_struct *session;
+	char *kbuf;                     /* Points to the message to post */
+	unsigned int len;               /* Size of the message to post */
 	struct delayed_work delayed_work;
-	struct list_head list; // used to link the node in a list
+	struct list_head list;
 };
 
-// Used by a blocking read to sleep waiting for available messages
+/**
+* pending_read_struct - A read waiting for available messages
+*/
 struct pending_read_struct {
-	int msg_available;
-	int flushing;
-	struct list_head list; // used to link the node in a list	
+	int msg_available; /* Set from a writer when a new message is available */
+	int flushing;      /* Set when someone calls dev_flush() */
+	struct list_head list;	
 };
 
-// Extra information about an I/O session
+/**
+* session_struct - I/O session auxiliary information
+*/
 struct session_struct {
 	struct mutex mtx;
-	struct workqueue_struct *write_wq; // used to defer writes
-	unsigned long write_timeout; // 0 means immediate storing
-	unsigned long read_timeout; // 0 means non-blocking reads in the absence of messages
-	struct list_head pending_writes; // points to list of deferred writes
-	struct list_head list; // used to concatenate nodes in a list of sessions related to a an instance of the device file
+	struct workqueue_struct *write_wq; /* Used to defer writes*/
+	unsigned long write_timeout;       /* 0 means immediate storing */
+	unsigned long read_timeout;        /* 0 means non-blocking reads */
+	struct list_head pending_writes;
+	struct list_head list;
 };
 
-/* Supported File Operations*/
+/**************************Supported File Operations****************************/
 
 /**
 * dev_open - Initialize an I/O session to the device file
@@ -155,7 +173,7 @@ static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static long dev_ioctl(struct file *, unsigned int, unsigned long);
 
 /**
-* dev_flush - Reset the state of the device file+
+* dev_flush - Reset the state of the device file
 * 
 * @filep: pointer to %struct file representing the I/O session linked to the
 *         caller
