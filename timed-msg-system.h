@@ -26,6 +26,8 @@ struct minor_struct {
 	struct mutex mtx;
 	struct list_head fifo; // points to the FIFO queue of message_struct
 	struct list_head sessions; // open I/O sessions
+	struct list_head pending_reads; // points to list of pending reads
+	wait_queue_head_t read_wq; // used to implement blocking reads
 };
 
 // Represents a deferred write
@@ -41,6 +43,7 @@ struct pending_write_struct {
 // Used by a blocking read to sleep waiting for available messages
 struct pending_read_struct {
 	int msg_available;
+	int flushing;
 	struct list_head list; // used to link the node in a list	
 };
 
@@ -48,11 +51,9 @@ struct pending_read_struct {
 struct session_struct {
 	struct mutex mtx;
 	struct workqueue_struct *write_wq; // used to defer writes
-	wait_queue_head_t read_wq; // used to implement blocking reads
 	unsigned long write_timeout; // 0 means immediate storing
 	unsigned long read_timeout; // 0 means non-blocking reads in the absence of messages
 	struct list_head pending_writes; // points to list of deferred writes
-	struct list_head pending_reads; // points to list of pending reads
 	struct list_head list; // used to concatenate nodes in a list of sessions related to a an instance of the device file
 };
 

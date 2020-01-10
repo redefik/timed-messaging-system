@@ -48,9 +48,8 @@ static int dev_open(struct inode *inodep, struct file *filep)
 	session_struct->write_timeout = 0;
 	session_struct->read_timeout = 0;
 	INIT_LIST_HEAD(&(session_struct->pending_writes));
-	INIT_LIST_HEAD(&(session_struct->pending_reads));
 	INIT_LIST_HEAD(&(session_struct->list));
-	init_waitqueue_head(&(session_struct->read_wq));
+	
 	// Link the object to struct file
 	filep->private_data = (void *)session_struct;
 	// Link the object to minor_struct
@@ -85,9 +84,8 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	mutex_unlock(&(minors[minor_idx].mtx));	
 	mutex_lock(&(session->mtx));
 	read_timeout = session->read_timeout;
-	
+	mutex_unlock(&(session->mtx));
 	if (!read_timeout) { // Non-blocking read
-		mutex_unlock(&(session->mtx));
 		return -EAGAIN;
 	}
 	
@@ -101,34 +99,43 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	}
 	// Initialize a pending_read_struct
 	pending_read->msg_available = 0;
+	pending_read->flushing = 0;
 	INIT_LIST_HEAD(&(pending_read->list));
+	mutex_lock(&(minors[minor_idx].mtx));
 	// Insert the object in the queue of the pending reads
-	list_add_tail(&(pending_read->list), &(session->pending_reads));
-	mutex_unlock(&(session->mtx));
+	list_add_tail(&(pending_read->list), &(minors->pending_reads));
+	mutex_unlock(&(minors[minor_idx].mtx));
 	
 	// TODO to be modified after implementing flush()
 	// Go to sleep waiting for available messages
 	while (to_sleep) {
-		ret = wait_event_interruptible_timeout(session->read_wq, 
-		                                       pending_read->msg_available,
+		ret = wait_event_interruptible_timeout(minors[minor_idx].read_wq, 
+		                                       pending_read->msg_available || pending_read->flushing,
 		                                       to_sleep);
 		if (ret == -ERESTARTSYS) { // sleep interrupted by a signal
-			goto remove_pending_read;
+			if (pending_read->msg_available || pending_read->flushing) {
+				goto free_pending_read;
+			} else {
+				goto remove_pending_read;
+			}
 		}
 		if (ret == 0) { // empty list after timer expiration
 			ret = -ETIME;
 			goto remove_pending_read;
+		}
+		if (pending_read->flushing) { // dev_flush() has been invoked
+			ret = -ECANCELED;
+			goto free_pending_read;
 		}
 		// Check if the list is actually not empty
 		mutex_lock(&(minors[minor_idx].mtx));
 		msg = list_first_entry_or_null(&(minors[minor_idx].fifo), 
 	                                   struct message_struct, list);		
 		if (msg == NULL) { // the list is actually empty so return to sleep
-			mutex_unlock(&(minors[minor_idx].mtx));
 			pending_read->msg_available = 0;
-			mutex_lock(&(session->mtx));
-			list_add_tail(&(pending_read->list), &(session->pending_reads));
-			mutex_unlock(&(session->mtx));
+			list_add_tail(&(pending_read->list), 
+				      &(minors[minor_idx].pending_reads));
+			mutex_unlock(&(minors[minor_idx].mtx));
 			to_sleep = ret;
 		} else { // a message is actually available
 			kfree(pending_read);
@@ -151,9 +158,10 @@ deliver_message:
 	kfree(msg);
 	return len;
 remove_pending_read:
-	mutex_lock(&(session->mtx));
+	mutex_lock(&(minors[minor_idx].mtx));
 	list_del(&(pending_read->list));
-	mutex_unlock(&(session->mtx));
+	mutex_unlock(&(minors[minor_idx].mtx));
+free_pending_read:
 	kfree(pending_read);
 	return ret;	
 }
@@ -163,7 +171,6 @@ static int post_message(int minor_idx, char *kbuf, size_t len)
 {
 	struct message_struct *msg;
 	
-	mutex_lock(&(minors[minor_idx].mtx));
 	if (minors[minor_idx].current_size + len > max_storage_size) {
 		mutex_unlock(&(minors[minor_idx].mtx));
 		kfree(kbuf);
@@ -180,24 +187,24 @@ static int post_message(int minor_idx, char *kbuf, size_t len)
 	INIT_LIST_HEAD(&(msg->list));
 	list_add_tail(&(msg->list),&(minors[minor_idx].fifo));
 	minors[minor_idx].current_size += len;
-	mutex_unlock(&(minors[minor_idx].mtx));
+	
 	return len;
 }
 
 // TODO Consider make it inlined
-static void awake_pending_reader(struct session_struct *session)
+static void awake_pending_reader(struct minor_struct *minor)
 {
 	struct pending_read_struct *pending_read;
 	
-	mutex_lock(&(session->mtx));
-	pending_read = list_first_entry_or_null(&(session->pending_reads), 
-	                                        struct pending_read_struct, list);
+	pending_read = list_first_entry_or_null(&(minor->pending_reads), 
+	                                        struct pending_read_struct, 
+	                                        list);
 	if (pending_read) {
 		list_del(&(pending_read->list));
 		pending_read->msg_available = 1;
-		wake_up_interruptible(&(session->read_wq));
+		wake_up_interruptible(&(minor->read_wq));
 	}
-	mutex_unlock(&(session->mtx));
+
 }
 
 static void deferred_write(struct work_struct *work_struct)
@@ -217,11 +224,13 @@ static void deferred_write(struct work_struct *work_struct)
 	list_del(&(pending_write->list));
 	mutex_unlock(&(pending_write->session->mtx));
 	
+	mutex_lock(&(minors[pending_write->minor].mtx));
 	ret = post_message(pending_write->minor, 
 	                   pending_write->kbuf, pending_write->len);
 	if (ret >= 0) { // message post succeeded
-		awake_pending_reader(pending_write->session);
-	}	
+		awake_pending_reader(&(minors[pending_write->minor]));
+	}
+	mutex_unlock(&(minors[pending_write->minor].mtx));	
 	
 	kfree(pending_write);		
 	return;
@@ -274,7 +283,8 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	mutex_lock(&(session->mtx));
 	if (session->write_timeout) { // a write timeout exists
 		// Allocate a pending_write_struct object
-		pending_write = kmalloc(sizeof(struct pending_write_struct), GFP_KERNEL);
+		pending_write = kmalloc(sizeof(struct pending_write_struct), 
+		                        GFP_KERNEL);
 		if (pending_write == NULL) {
 			kfree(kbuf);
 			mutex_unlock(&(session->mtx));
@@ -290,7 +300,8 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 		// Add the object to the list of pending writes linked to the session
 		list_add_tail(&(pending_write->list),&(session->pending_writes));
 		// Defer the write using the write workqueue
-		queue_delayed_work(session->write_wq, &(pending_write->delayed_work), 
+		queue_delayed_work(session->write_wq, 
+		                   &(pending_write->delayed_work), 
 		                   session->write_timeout);
 		mutex_unlock(&(session->mtx));
 		return 0; // no byte actually written                                                 
@@ -299,10 +310,12 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	mutex_unlock(&(session->mtx));
 	
 	// Immediate write
+	mutex_lock(&(minors[minor_idx].mtx));
 	ret = post_message(minor_idx, kbuf, len);
 	if (ret >= 0) { // message post succeeded
-		awake_pending_reader(session);
+		awake_pending_reader(&(minors[minor_idx]));
 	}
+	mutex_unlock(&(minors[minor_idx].mtx));
 	
 	return ret;
 }
@@ -313,10 +326,10 @@ static void revoke_delayed_messages(struct session_struct *session)
 	struct list_head *tmp;
 	struct pending_write_struct *pending_write;
 
-	mutex_lock(&(session->mtx));
 	// Scan pending writes
 	list_for_each_safe(ptr, tmp, &(session->pending_writes)) {
-		pending_write = list_entry(ptr, struct pending_write_struct, list);
+		pending_write = list_entry(ptr, struct pending_write_struct, 
+		                           list);
 		// Cancel delayed write
 		// NOTE that the pending write may be actually already in execution
 		// thus we have to check return value
@@ -326,7 +339,6 @@ static void revoke_delayed_messages(struct session_struct *session)
 			kfree(pending_write);
 		}
 	}
-	mutex_unlock(&(session->mtx));
 }
 
 // TODO possibly provide a more fine-grained timeout mechanism
@@ -367,13 +379,30 @@ static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 		mutex_unlock(&(session->mtx));
 		break;
 	case REVOKE_DELAYED_MESSAGES:
+		mutex_lock(&(session->mtx));
 		revoke_delayed_messages(session);
+		mutex_unlock(&(session->mtx));
 		break;
 	default:
 		printk(KERN_INFO "%s: ioctl() command not valid\n", MODNAME);
 		return -ENOTTY;
 	}
 	return 0;
+}
+
+static void revoke_pending_reads(struct minor_struct *minor)
+{
+	struct list_head *ptr;
+	struct list_head *tmp;
+	struct pending_read_struct *pending_read;
+	
+	list_for_each_safe(ptr, tmp, &(minor->pending_reads)) {
+		pending_read = list_entry(ptr, struct pending_read_struct,
+					  list);
+		pending_read->flushing = 1;
+		list_del(&(pending_read->list));
+		wake_up_interruptible(&(minor->read_wq));			  
+	}
 }
 
 static int dev_flush(struct file *filep, fl_owner_t id)
@@ -387,8 +416,12 @@ static int dev_flush(struct file *filep, fl_owner_t id)
 	// Revoke delayed writes
 	list_for_each(ptr, &(minors[minor_idx].sessions)) {
 		session = list_entry(ptr, struct session_struct, list);
+		mutex_lock(&(session->mtx));
 		revoke_delayed_messages(session);
+		mutex_unlock(&(session->mtx));
 	}
+	// Revoke pending reads
+	revoke_pending_reads(&(minors[minor_idx]));
 	mutex_unlock(&(minors[minor_idx].mtx));
 	
 	return 0;
@@ -436,6 +469,8 @@ static int __init install_driver(void)
 	for (i = 0; i < MINORS; i++) {
 		minors[i].current_size = 0;
 		mutex_init(&(minors[i].mtx));
+		INIT_LIST_HEAD(&(minors[i].pending_reads));
+		init_waitqueue_head(&(minors[i].read_wq));
 		INIT_LIST_HEAD(&(minors[i].fifo));
 		INIT_LIST_HEAD(&(minors[i].sessions));
 	}
