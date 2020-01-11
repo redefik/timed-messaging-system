@@ -23,6 +23,8 @@ int main(int argc, char *argv[])
 		return(EXIT_FAILURE);
 	}
 	
+	printf("pid: %d\n", getpid());
+	
 	// Open the device file
 	fd = open(argv[1], O_RDWR);
 	if (fd == -1) {

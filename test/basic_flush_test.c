@@ -11,6 +11,9 @@
 #include <sys/sysmacros.h>
 #include "../timed-msg-system.h"
 
+// Execute after sudoing
+// Ensure that the device file instance is empty to observe the expected behaviour
+
 #define MINOR 0
 #define MAX_MSG_SIZE 128
 

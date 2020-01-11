@@ -124,7 +124,11 @@ static int dev_release(struct inode *, struct file *);
 * - %-ERESTARTSYS if the blocking read is interrupted by a signal
 * - %-ECANCELED if during a blocking read someone reset the state of the 
 *   device file through dev_flush()
-* - %-EFAULT if the provided buffer is illegal   
+* - %-EFAULT if the provided buffer is illegal
+*
+* NOTE The message receipt fully invalidates the content of the message to
+*      be delivered, even if the read() operation requests less bytes than
+*      the current size of the message.
 */
 static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 

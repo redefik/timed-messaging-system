@@ -81,6 +81,7 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 		
 	session = (struct session_struct *)filep->private_data;
 	minor_idx = fminor(filep);
+
 	mutex_lock(&(minors[minor_idx].mtx));
 	
 	/* Retrieve the first message stored in the device file */
@@ -113,7 +114,7 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	INIT_LIST_HEAD(&(pending_read->list));
 	mutex_lock(&(minors[minor_idx].mtx));
 	/* Enqueue the pending read to the others */
-	list_add_tail(&(pending_read->list), &(minors->pending_reads));
+	list_add_tail(&(pending_read->list), &(minors[minor_idx].pending_reads));
 	mutex_unlock(&(minors[minor_idx].mtx));
 	
 	/* Go to sleep waiting for available messages */
@@ -293,6 +294,7 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 	}
 	
 	minor_idx = fminor(filep);
+
 	mutex_lock(&(session->mtx));
 	if (session->write_timeout) { /* a write timeout exists */		
 		/* Allocate a pending_write_struct */

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include "../timed-msg-system.h"
 
 #define MAX_MSG_SIZE 128
@@ -17,11 +18,14 @@ int main(int argc, char *argv[])
 	char msg[MAX_MSG_SIZE];
 	unsigned long write_timeout;
 
-	if (argc != 3) {
-		fprintf(stderr, "Usage: sudo %s <filename> <write_timeout>\n",
+	if (argc != 4) {
+		fprintf(stderr, "Usage: sudo %s <filename> <write_timeout> <manual/auto>\n",
 		        argv[0]);
 		return(EXIT_FAILURE);
 	}
+	
+	printf("pid: %d\n", getpid());
+
 	
 	// Open the input file
 	fd = open(argv[1], O_RDWR);
@@ -38,7 +42,21 @@ int main(int argc, char *argv[])
 		return(EXIT_FAILURE);
 	}
 	
-	// Wait for user's input
+	
+	if (strcmp(argv[3],"auto") == 0) { // Automatic, a message is written every second
+		srandom(time(NULL));
+		while (1) {
+			sprintf(msg, "%ld", random());
+			ret = write(fd, msg, strlen(msg) +1);
+			if (ret == -1) {
+				fprintf(stderr, "write() failed: %s\n", strerror(errno));
+				return(EXIT_FAILURE);
+			}
+			sleep(1);
+		}
+	}
+	
+	// Manual, Wait for user's input
 	while (1) {
 		fputc('>', stdout);
 		fflush(stdout);

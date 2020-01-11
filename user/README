@@ -1,0 +1,29 @@
+The purpose of these two C programs is testing the device driver.
+
+Both programs must be run after sudoing.
+
+/-------------------------------------writer.c---------------------------------/
+writer.c receives 3 input:
+1) The pathname of a device file handled by the device driver
+2) A write timeout (expressed in milliseconds)
+3) A string: "manual" or "auto"
+If the "manual" string is provided, the program starts a command line when
+the user can insert message to be posted into the device file.
+If the "auto" string is provided, the program posts every second a random number
+in the device file. (The store is actually immediate or delayed according to the
+provided input).
+
+In the "manual" version for each write() the return value and possibly the errno
+are printed. Some input are special:
+-REVOKE_DELAYED_MESSAGES causes the revoke of the delayed messages related to 
+ the current I/O session.
+-CLOSE close the file descriptor and exit. This causes the invocation of flush()
+ so the delayed messages along any sessions should be revoked and the readers
+ waiting for messages along any sessions should be unblocked.
+ 
+/-----------------------------------reader.c-----------------------------------/
+reader.c receives 2 input:
+1) The pathname of a device file handled by the device driver
+2) A read timeout (expressed in milliseconds)
+The program tries to read the given device file in a infinite loop until
+arrested manually. For each read() try the return value is printed.
