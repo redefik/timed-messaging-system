@@ -314,10 +314,10 @@ static ssize_t dev_write(struct file *filep, const char *bufp, size_t len, loff_
 		INIT_DELAYED_WORK(&(pending_write->delayed_work), __deferred_write);
 		/* Enqueue the pending write to the list of the others */
 		list_add_tail(&(pending_write->list),&(session->pending_writes));
+		mutex_unlock(&(session->mtx));
 		queue_delayed_work(session->write_wq, 
 		                   &(pending_write->delayed_work), 
 		                   session->write_timeout);
-		mutex_unlock(&(session->mtx));
 		return 0; /* no byte actually written */                                                 
 	}
 	
