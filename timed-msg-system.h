@@ -124,6 +124,7 @@ static int dev_release(struct inode *, struct file *);
 * - %-ERESTARTSYS if the blocking read is interrupted by a signal
 * - %-ECANCELED if during a blocking read someone reset the state of the 
 *   device file through dev_flush()
+* - %-ETIME if timeout expired
 * - %-EFAULT if the provided buffer is illegal
 *
 * NOTE The message receipt fully invalidates the content of the message to
