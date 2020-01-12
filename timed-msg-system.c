@@ -194,13 +194,11 @@ static int __post_message(struct minor_struct *minor, char *kbuf, size_t len)
 	struct message_struct *msg;
 	
 	if (minor->current_size + len > max_storage_size) {
-		mutex_unlock(&(minor->mtx));
 		kfree(kbuf);
 		return -EAGAIN;
 	}
 	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
 	if (msg == NULL) {
-		mutex_unlock(&(minor->mtx));
 		kfree(kbuf);
 		return -ENOMEM;
 	}

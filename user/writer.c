@@ -52,7 +52,7 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "write() failed: %s\n", strerror(errno));
 				return(EXIT_FAILURE);
 			}
-			sleep(1);
+			//sleep(1);
 		}
 	}
 	
