@@ -26,4 +26,4 @@ reader.c receives 2 input:
 1) The pathname of a device file handled by the device driver
 2) A read timeout (expressed in milliseconds)
 The program tries to read the given device file in a infinite loop until
-arrested manually. For each read() try the return value is printed.
+arrested manually. For each read() attempt the return value is printed.
