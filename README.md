@@ -19,8 +19,8 @@ Concurrent I/O sessions on the device file are supported too. Each session can b
 The driver support the following set of file operations (see `timed-msg-system.h` for further details):
 - `open`: Initialize an I/O session on an instance of the device file. It returns 0 on success.
 - `unlocked_ioctl()`: Modify the operating mode of `read()` and `write()` as previously described. It returns 0 on success.
-- `write()`: Write a message into the device file. On success, it returns 0 if a write timeout exists, the number of written bytes otherwise. If the input message is too long `-EMSGSIZE` is returned, if the device file is full, `-EAGAIN` is returned. Note that when a write is delayed, the message-post operation may fail in the absence of free space in the device file.
-- `read()`: Read a message from the device file. It returns the number of read bytes on success. Otherwise, it returns `-EAGAIN` if no message is available and the operating mode is non-blocking and `-ETIME` when the operating mode is blocking and the timeout expires.
+- `write()`: Write a message into the device file. On success, it returns 0 if a write timeout exists, the number of written bytes otherwise. If the input message is too long `-EMSGSIZE` is returned, if the device file is full, `-ENOSPC` is returned. Note that when a write is delayed, the message-post operation may fail in the absence of free space in the device file.
+- `read()`: Read a message from the device file. It returns the number of read bytes on success. Otherwise, it returns `-ENOMSG` if no message is available and the operating mode is non-blocking and `-ETIME` when the operating mode is blocking and the timeout expires.
 - `flush()`: Reset the state of the device file. In more detail, it causes all threads waiting for messages (along any session) to be unblocked (in that case, `read()` returns `-ECANCELED`) and all the delayed messages not yet delivered to be revoked. This function is called every time an application call `close()`.
 - `release()`: Release an I/O session on the device file. It is not invoked every time a process calls close. Whenever a `file` structure is shared, it won't be invoked until all copies are closed.
 
@@ -98,7 +98,7 @@ When `open()` is invoked, the driver initializes a `session_struct` object corre
 
 #### Reading a file
 Upon `read()` invocation,  the driver access the list of messages of the device file. If a message is available, it is delivered. Otherwise:
-- If the operating mode is non-blocking, `-EAGAIN` is returned.
+- If the operating mode is non-blocking, `-ENOMSG` is returned.
 - If the operating mode is blocking, the thread goes to sleep using `wait_event_interruptible_timeout()` on the `read_wq` waitqueue associated to the device number. Before that, the driver create a new `pending_read_struct` and adds it to the list of pending reads associated to the device file. Different pending readers are associated with different `pending_read_struct`. In that way, selective awakes are possible. In more detail, a reader is awaken if either the `flushing` flag or the `msg_available` flag is set. In the first case, `-ECANCELED` is returned. In the latter case, altough the reader has been awakened by a writer that posted a new message, the reader must check that the list of messages is actually not empty, becasue, due to concurrency, another reader may have been consumed the new message. In that scenario, the reader returns to sleep for the residual amount of jiffies (that the `wait_event_interruptible_timeout` returns when the wait condition becomes true before timer expiration).
 
 #### Writing a file

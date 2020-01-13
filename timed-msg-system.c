@@ -98,7 +98,7 @@ static ssize_t dev_read(struct file *filep, char *bufp, size_t len, loff_t *offp
 	read_timeout = session->read_timeout;
 	mutex_unlock(&(session->mtx));
 	if (!read_timeout) { /* Non-blocking read */
-		return -EAGAIN;
+		return -ENOMSG;
 	}
 	
 	/* Blocking read */
@@ -195,7 +195,7 @@ static int __post_message(struct minor_struct *minor, char *kbuf, size_t len)
 	
 	if (minor->current_size + len > max_storage_size) {
 		kfree(kbuf);
-		return -EAGAIN;
+		return -ENOSPC;
 	}
 	msg = kmalloc(sizeof(struct message_struct), GFP_KERNEL);
 	if (msg == NULL) {

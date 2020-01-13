@@ -85,8 +85,8 @@ int main(int argc, char *argv[])
 		
 	printf("Reading...\n");
 	ret = read(fd, msg, MAX_MSG_SIZE);
-	if (ret == -1 && errno == EAGAIN) {
-		printf("read() returned EAGAIN as expected\n");
+	if (ret == -1 && errno == ENOMSG) {
+		printf("read() returned ENOMSG as expected\n");
 		return(EXIT_SUCCESS);
 	}
 

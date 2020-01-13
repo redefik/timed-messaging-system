@@ -118,7 +118,7 @@ static int dev_release(struct inode *, struct file *);
 * @offp: unused
 *
 * Returns the number of read bytes on success. Otherwise, it returns:
-* - %-EAGAIN if no message is available and the operating mode of
+* - %-ENOMSG if no message is available and the operating mode of
 *   the I/O session is non-blocking (read timeout equal to 0)
 * - %-ENOMEM if it fails in allocating a %pending_read_struct
 * - %-ERESTARTSYS if the blocking read is interrupted by a signal
@@ -146,7 +146,7 @@ static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
  * - %EMSGSIZE if the message is too long (len > max_message_size)
  * - %ENOMEM if allocation of used kernel buffers fails
  * - %EFAULT if @bufp points to an illegal memory area
- * - %EAGAIN if the device file is temporary full
+ * - %ENOSPC if the device file is temporary full
  * - %0 if a write timeout exists. In that case, the actual write is delayed.
  *
  * NOTE that when the write is delayed, it may fail in the absence of free

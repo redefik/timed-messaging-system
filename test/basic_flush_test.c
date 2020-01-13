@@ -74,10 +74,10 @@ int main(int argc, char *argv[])
 		return(EXIT_FAILURE);
 	}
 	usleep((2*write_timeout)*1000);
-	// Read - EAGAIN expected
+	// Read - ENOMSG expected
 	ret = read(fd, buf, MAX_MSG_SIZE);
-	if (ret == -1 && errno == EAGAIN) {
-		printf("read() returned EAGAIN as expected\n");
+	if (ret == -1 && errno == ENOMSG) {
+		printf("read() returned ENOMSG as expected\n");
 		close(fd);
 		return(EXIT_SUCCESS);
 	} else {
