@@ -358,7 +358,6 @@ static void __revoke_delayed_messages(struct session_struct *session)
 	}
 }
 
-// TODO possibly provide a more fine-grained timeout mechanism
 static long dev_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 {
 	struct session_struct *session;
