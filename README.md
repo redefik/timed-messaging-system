@@ -110,7 +110,7 @@ For example...
 ```
 ioctl(fd, SET_SEND_TIMEOUT, 20);
 ```
-set a write timeout to the value of 20 milliseconds. The milliseconds input is converted in jiffies using the `HZ` macro contained in `linux/param.h`. This macro represents the number of jiffies per second. Therefore, the conversion requires to multiply the `ioctl` input for `HZ` and divide it by 1000. The value of `HZ` is machine-dependent. Typical values are 10 and 100.
+set a write timeout to the value of 20 milliseconds. The milliseconds input is converted in jiffies using the `HZ` macro contained in `linux/param.h`. This macro represents the number of jiffies per second. Therefore, the conversion requires to multiply the `ioctl` input for `HZ` and divide it by 1000. The value of `HZ` is machine-dependent. Typical values are 100 and 1000.
 
 #### Revoking delayed messages
 Invoking `ioctl(fd, REVOKE_DELAYED_MESSAGES)` the deferred writes along a given session are revoked. This is made internally by using the API `cancel_delayed_work()`. This function returns `true` if the canceled work was actually pending, `false` otherwise. The latter return value shows up when a deferred write has not yet completed its execution. `dev_flush()` does not wait for deferred writes like that while `dev_release()` does that as we will see below.

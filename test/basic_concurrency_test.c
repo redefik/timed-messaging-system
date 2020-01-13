@@ -60,7 +60,7 @@ void *reader(void *arg)
 	// Read messages from the device file
 	while (1) {
 		ret = read(fd, msg, MAX_MSG_SIZE);
-		if (ret == -1 && errno != EAGAIN) {
+		if (ret == -1 && errno != ENOMSG) {
 			fprintf(stderr, "read() failed\n");
 			exit(EXIT_FAILURE);
 		}
