@@ -186,7 +186,7 @@ free_pending_read:
 * @len: size of the message
 *
 * Returns the number of written bytes on success. Otherwise, it returns
-* %-EAGAIN if the device file has no free space or %-ENOMEM if it fails in
+* %-ENOSPC if the device file has no free space or %-ENOMEM if it fails in
 * allocating the %message_struct to post
 * */
 static int __post_message(struct minor_struct *minor, char *kbuf, size_t len)
@@ -496,7 +496,7 @@ static void __exit uninstall_driver(void)
 	struct message_struct *msg;
 	
 	for (i = 0; i < MINORS; i++) {
-		mutex_lock(&(minors[i].mtx));
+		//mutex_lock(&(minors[i].mtx));
 		/* Flush content of the device files */
 		list_for_each_safe(ptr, tmp, &(minors[i].fifo)) {
 			msg = list_entry(ptr, struct message_struct, list);
@@ -504,7 +504,7 @@ static void __exit uninstall_driver(void)
 			kfree(msg->buf);
 			kfree(msg);			
 		}
-		mutex_unlock(&(minors[i].mtx));
+		//mutex_unlock(&(minors[i].mtx));
 	}
 	
 	/* Driver unregistration */
