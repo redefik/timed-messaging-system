@@ -10,7 +10,6 @@
 /**********************************kernel part**********************************/
 
 #ifdef __KERNEL__
-#define TEST // comment in "production"
 
 #define MODNAME "TIMED-MSG-SYSTEM"
 #define DEVICE_NAME "timed-msg-device"
@@ -86,7 +85,7 @@ struct session_struct {
 * Returns %0 on success, %-ENOMEM if it fails in allocating auxiliary data
 * structures
 * 
-* This function initialize a %session_struct object and link it to struct file
+* This function initializes a %session_struct object and links it to struct file
 * using the available field %private_data
 */
 static int dev_open(struct inode *, struct file *);
